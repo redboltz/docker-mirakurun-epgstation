@@ -15,23 +15,25 @@ if (!fs.existsSync(input)) {
     console.log('? Input file exists:', input);
 }
 
+const VIDEO_ENCODING_PARAMS = {
+    rc: 'vbr_hq',
+    cq: '25',
+    bitrate: '5M',
+    maxrate: '10M',
+    bufsize: '15M',
+    preset: 'p4',
+    profile: 'high',
+};
 
 const args = ['-y'];
 
-/**
- * 動画長取得関数
- * @param {string} filePath ファイルパス
- * @return number 動画長を返す (秒)
- */
 const getDuration = filePath => {
     return new Promise((resolve, reject) => {
         execFile(ffprobe, ['-v', '0', '-show_format', '-of', 'json', filePath], (err, stdout) => {
             if (err) {
                 reject(err);
-
                 return;
             }
-
             try {
                 const result = JSON.parse(stdout);
                 resolve(parseFloat(result.format.duration));
@@ -42,104 +44,76 @@ const getDuration = filePath => {
     });
 };
 
-// 字幕用
-Array.prototype.push.apply(args, ['-fix_sub_duration']);
-// input 設定
-Array.prototype.push.apply(args, ['-i', input]);
-// ビデオストリーム設定
-Array.prototype.push.apply(args, ['-map', '0:v', '-c:v', 'h264_nvenc']);
-// インターレス解除
-Array.prototype.push.apply(args, ['-vf', 'yadif']);
-// オーディオストリーム設定
-if (isDualMono) {
-    args.push(
-        '-filter_complex',
-        'channelsplit[FL][FR]',
-        '-map', '[FL]',
-        '-map', '[FR]',
-        '-metadata:s:a:0', 'language=jpn',
-        '-metadata:s:a:1', 'language=eng',
-        '-c:a', 'aac', // ← 追加（copyからaacへ）
-        '-b:a', '192k' // ← 任意：ビットレートも指定
-    );
-} else {
-    args.push('-map', '0:a', '-c:a', 'copy');
-}
-
-//Array.prototype.push.apply(args, ['-c:a', 'copy']);
-//Array.prototype.push.apply(args, ['-c:a', 'aac']);
-// 字幕ストリーム設定
-Array.prototype.push.apply(args, ['-map', '0:s?', '-c:s', 'mov_text']);
-// 品質設定（高画質設定）
-Array.prototype.push.apply(args, [
-    '-rc:v', 'vbr_hq',
-    '-cq:v', '18',
-    '-b:v', '10M',
-    '-maxrate:v', '20M',
-    '-bufsize:v', '25M',
-    '-preset', 'p4',
-    '-profile:v', 'high'
-]);
-
-// 出力ファイル
-Array.prototype.push.apply(args, [output]);
+const getAudioChannels = filePath => {
+    return new Promise((resolve, reject) => {
+        execFile(ffprobe, ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=channels', '-of', 'json', filePath], (err, stdout) => {
+            if (err) {
+                reject(err);
+                return;
+            }
+            try {
+                const result = JSON.parse(stdout);
+                resolve(result.streams[0].channels);
+            } catch (err) {
+                reject(err);
+            }
+        });
+    });
+};
 
 (async () => {
-    // 進捗計算のために動画の長さを取得
     const duration = await getDuration(input);
+    const channels = await getAudioChannels(input);
 
-    const child = spawn(ffmpeg, args);
+    Array.prototype.push.apply(args, ['-fix_sub_duration']);
+    Array.prototype.push.apply(args, ['-i', input]);
+    Array.prototype.push.apply(args, ['-map', '0:v', '-c:v', 'h264_nvenc']);
+    Array.prototype.push.apply(args, ['-vf', 'yadif']);
+
+    if (isDualMono) {
+        args.push(
+            '-filter_complex',
+            'channelsplit[FL][FR]',
+            '-map', '[FL]',
+            '-map', '[FR]',
+            '-metadata:s:a:0', 'language=jpn',
+            '-metadata:s:a:1', 'language=eng',
+            '-c:a', 'aac',
+            '-b:a', '192k'
+        );
+    } else if (channels >= 6) {
+        args.push('-map', '0:a:0', '-c:a', 'copy', '-bsf:a', 'aac_adtstoasc');
+    } else {
+        args.push('-map', '0:a:0', '-c:a', 'aac', '-b:a', '192k');
+    }
+
+    Array.prototype.push.apply(args, ['-map', '0:s?', '-c:s', 'mov_text']);
+    Array.prototype.push.apply(args, [
+        '-rc:v', VIDEO_ENCODING_PARAMS.rc,
+        '-cq:v', VIDEO_ENCODING_PARAMS.cq,
+        '-b:v', VIDEO_ENCODING_PARAMS.bitrate,
+        '-maxrate:v', VIDEO_ENCODING_PARAMS.maxrate,
+        '-bufsize:v', VIDEO_ENCODING_PARAMS.bufsize,
+        '-preset', VIDEO_ENCODING_PARAMS.preset,
+        '-profile:v', VIDEO_ENCODING_PARAMS.profile
+    ]);
+    Array.prototype.push.apply(args, [output]);
+
+    let child = spawn(ffmpeg, args);
 
     child.stderr.on('data', data => {
-	console.error('[ffmpeg stderr]', data.toString());
+        console.error('[ffmpeg stderr]', data.toString());
     });
-    
-    /**
-     * エンコード進捗表示用に標準出力に進捗情報を吐き出す
-     * 出力する JSON
-     * {"type":"progress","percent": 0.8, "log": "view log" }
-     */
+
     child.stderr.on('data', data => {
         let strbyline = String(data).split('\n');
         for (let i = 0; i < strbyline.length; i++) {
             let str = strbyline[i];
             if (str.startsWith('frame')) {
-                // 想定log
-                // frame= 5159 fps= 11 q=29.0 size=  122624kB time=00:02:51.84 bitrate=5845.8kbits/s dup=19 drop=0 speed=0.372x
                 const progress = {};
                 const ffmpeg_reg = /frame=\s*(?<frame>\d+)\sfps=\s*(?<fps>\d+(?:\.\d+)?)\sq=\s*(?<q>[+-]?\d+(?:\.\d+)?)\sL?size=\s*(?<size>\d+(?:\.\d+)?)kB\stime=\s*(?<time>\d+[:\.\d+]*)\sbitrate=\s*(?<bitrate>\d+(?:\.\d+)?)kbits\/s(?:\sdup=\s*(?<dup>\d+))?(?:\sdrop=\s*(?<drop>\d+))?\sspeed=\s*(?<speed>\d+(?:\.\d+)?)x/;
-                let ffmatch =str.match(ffmpeg_reg);
-                /**
-                 * match結果
-                 * [
-                 *   'frame= 5159 fps= 11 q=29.0 size=  122624kB time=00:02:51.84 bitrate=5845.8kbits/s dup=19 drop=0 speed=0.372x',
-                 *   '5159',
-                 *   '11',
-                 *   '29.0',
-                 *   '122624',
-                 *   '00:02:51.84',
-                 *   '5845.8',
-                 *   '19',
-                 *   '0',
-                 *   '0.372',
-                 *   index: 0,
-                 *   input: 'frame= 5159 fps= 11 q=29.0 size=  122624kB time=00:02:51.84 bitrate=5845.8kbits/s dup=19 drop=0 speed=0.372x    \r',
-                 *   groups: [Object: null prototype] {
-                 *     frame: '5159',
-                 *     fps: '11',
-                 *     q: '29.0',
-                 *     size: '122624',
-                 *     time: '00:02:51.84',
-                 *     bitrate: '5845.8',
-                 *     dup: '19',
-                 *     drop: '0',
-                 *     speed: '0.372'
-                 *   }
-                 * ]
-                 */
-
+                let ffmatch = str.match(ffmpeg_reg);
                 if (ffmatch === null) continue;
-
                 progress['frame'] = parseInt(ffmatch.groups.frame);
                 progress['fps'] = parseFloat(ffmatch.groups.fps);
                 progress['q'] = parseFloat(ffmatch.groups.q);
@@ -162,7 +136,6 @@ Array.prototype.push.apply(args, [output]);
                     }
                 }
 
-                // 進捗率 1.0 で 100%
                 const percent = current / duration;
                 const log =
                     'frame= ' +
@@ -185,15 +158,31 @@ Array.prototype.push.apply(args, [output]);
         }
     });
 
-    child.on('error', err => {
-        console.error(err);
-        throw new Error(err);
-    });
     child.on('exit', (code, signal) => {
-        console.log(`?? ffmpeg exited with code: ${code}, signal: ${signal}`);
+        if (code === 0) {
+            console.log(`?? ffmpeg exited with code: ${code}, signal: ${signal}`);
+            return;
+        }
+
+        console.error(`?? ffmpeg failed with code: ${code}, trying fallback`);
+
+        const fallbackArgs = args.map(arg => {
+            if (arg === '-c:a') return 'aac';
+            if (arg === '-bsf:a') return null;
+            return arg;
+        }).filter(Boolean);
+
+        const fallback = spawn(ffmpeg, fallbackArgs);
+
+        fallback.stderr.on('data', data => {
+            console.error('[ffmpeg fallback stderr]', data.toString());
+        });
+
+        fallback.on('exit', (code, signal) => {
+            console.log(`?? fallback ffmpeg exited with code: ${code}, signal: ${signal}`);
+        });
     });
 
-    
     process.on('SIGINT', () => {
         child.kill('SIGINT');
     });

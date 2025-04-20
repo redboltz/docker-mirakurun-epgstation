@@ -1,18 +1,17 @@
-console.log('start')
-const spawn = require('child_process').spawn;
-const execFile = require('child_process').execFile;
-const ffmpeg = process.env.FFMPEG;
+console.log('start');
+const { spawn, execFile } = require('child_process');
 const fs = require('fs');
+const ffmpeg = process.env.FFMPEG;
 const ffprobe = process.env.FFPROBE;
-
 const input = process.env.INPUT;
 const output = process.env.OUTPUT;
-const isDualMono = parseInt(process.env.AUDIOCOMPONENTTYPE, 10) == 2;
+const isDualMono = parseInt(process.env.AUDIOCOMPONENTTYPE, 10) === 2;
+
 if (!fs.existsSync(input)) {
-    console.error('? Input file does not exist:', input);
+    console.error('[ERROR] Input file does not exist:', input);
     process.exit(1);
 } else {
-    console.log('? Input file exists:', input);
+    console.log('[INFO] Input file exists:', input);
 }
 
 const VIDEO_ENCODING_PARAMS = {
@@ -25,165 +24,107 @@ const VIDEO_ENCODING_PARAMS = {
     profile: 'high',
 };
 
-const args = ['-y'];
-
-const getDuration = filePath => {
-    return new Promise((resolve, reject) => {
-        execFile(ffprobe, ['-v', '0', '-show_format', '-of', 'json', filePath], (err, stdout) => {
-            if (err) {
-                reject(err);
-                return;
-            }
-            try {
-                const result = JSON.parse(stdout);
-                resolve(parseFloat(result.format.duration));
-            } catch (err) {
-                reject(err);
-            }
-        });
+const getDuration = filePath => new Promise((resolve, reject) => {
+    execFile(ffprobe, ['-v', '0', '-show_format', '-of', 'json', filePath], (err, stdout) => {
+        if (err) return reject(err);
+        try {
+            const result = JSON.parse(stdout);
+            resolve(parseFloat(result.format.duration));
+        } catch (e) { reject(e); }
     });
-};
+});
 
-const getAudioChannels = filePath => {
-    return new Promise((resolve, reject) => {
-        execFile(ffprobe, ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=channels', '-of', 'json', filePath], (err, stdout) => {
-            if (err) {
-                reject(err);
-                return;
-            }
-            try {
-                const result = JSON.parse(stdout);
-                resolve(result.streams[0].channels);
-            } catch (err) {
-                reject(err);
-            }
+const detect5_1StartTime = async filePath => {
+    const tmpDir = 'recorded/tmp_audio_scan';
+    fs.mkdirSync(tmpDir, { recursive: true });
+    for (let i = 0; i <= 120; i += 2) {
+        const tmpWav = `${tmpDir}/audio_${i}.wav`;
+        await new Promise(resolve => {
+            const proc = spawn(ffmpeg, ['-v', 'error', '-y', '-ss', `${i}`, '-t', '1', '-i', filePath, '-vn', '-acodec', 'pcm_s16le', '-ac', '6', '-f', 'wav', tmpWav]);
+            proc.on('exit', resolve);
         });
-    });
+        const channels = await new Promise(resolve => {
+            execFile(ffprobe, ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=channels', '-of', 'default=noprint_wrappers=1:nokey=1', tmpWav], (err, stdout) => {
+                resolve(stdout.trim());
+            });
+        });
+        console.log(`[CHECK] ${i}•b: ${channels}ch`);
+        if (channels === '6') {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+            return i;
+        }
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    return null;
 };
 
 (async () => {
     const duration = await getDuration(input);
-    const channels = await getAudioChannels(input);
+    const startTime = await detect5_1StartTime(input);
 
-    Array.prototype.push.apply(args, ['-fix_sub_duration']);
-    Array.prototype.push.apply(args, ['-i', input]);
-    Array.prototype.push.apply(args, ['-map', '0:v', '-c:v', 'h264_nvenc']);
-    Array.prototype.push.apply(args, ['-vf', 'yadif']);
+    const args = ['-y'];
+    if (startTime !== null) {
+        console.log(`[INFO] 5.1ch detected. Starting at ${startTime} seconds.`);
+        args.push('-ss', `${startTime}`);
+    } else {
+        console.log('[INFO] 5.1ch not detected in first 2 minutes. Encoding from beginning.');
+    }
+
+    args.push('-fix_sub_duration');
+    args.push('-i', input);
+    args.push('-map', '0:v', '-c:v', 'h264_nvenc', '-vf', 'yadif');
 
     if (isDualMono) {
-        args.push(
-            '-filter_complex',
-            'channelsplit[FL][FR]',
-            '-map', '[FL]',
-            '-map', '[FR]',
+        args.push('-filter_complex', 'channelsplit[FL][FR]',
+            '-map', '[FL]', '-map', '[FR]',
             '-metadata:s:a:0', 'language=jpn',
             '-metadata:s:a:1', 'language=eng',
-            '-c:a', 'aac',
-            '-b:a', '192k'
-        );
-    } else if (channels >= 6) {
-        args.push('-map', '0:a:0', '-c:a', 'copy', '-bsf:a', 'aac_adtstoasc');
+            '-c:a', 'aac', '-b:a', '192k');
+    } else if (startTime !== null) {
+        args.push('-map', '0:a:0', '-channel_layout', '5.1', '-c:a', 'ac3', '-b:a', '640k');
     } else {
         args.push('-map', '0:a:0', '-c:a', 'aac', '-b:a', '192k');
     }
 
-    Array.prototype.push.apply(args, ['-map', '0:s?', '-c:s', 'mov_text']);
-    Array.prototype.push.apply(args, [
-        '-rc:v', VIDEO_ENCODING_PARAMS.rc,
+    args.push('-map', '0:s?', '-c:s', 'mov_text');
+    args.push('-rc:v', VIDEO_ENCODING_PARAMS.rc,
         '-cq:v', VIDEO_ENCODING_PARAMS.cq,
         '-b:v', VIDEO_ENCODING_PARAMS.bitrate,
         '-maxrate:v', VIDEO_ENCODING_PARAMS.maxrate,
         '-bufsize:v', VIDEO_ENCODING_PARAMS.bufsize,
         '-preset', VIDEO_ENCODING_PARAMS.preset,
-        '-profile:v', VIDEO_ENCODING_PARAMS.profile
-    ]);
-    Array.prototype.push.apply(args, [output]);
+        '-profile:v', VIDEO_ENCODING_PARAMS.profile);
+    args.push(output);
 
     let child = spawn(ffmpeg, args);
 
     child.stderr.on('data', data => {
-        console.error('[ffmpeg stderr]', data.toString());
-    });
-
-    child.stderr.on('data', data => {
-        let strbyline = String(data).split('\n');
-        for (let i = 0; i < strbyline.length; i++) {
-            let str = strbyline[i];
-            if (str.startsWith('frame')) {
-                const progress = {};
-                const ffmpeg_reg = /frame=\s*(?<frame>\d+)\sfps=\s*(?<fps>\d+(?:\.\d+)?)\sq=\s*(?<q>[+-]?\d+(?:\.\d+)?)\sL?size=\s*(?<size>\d+(?:\.\d+)?)kB\stime=\s*(?<time>\d+[:\.\d+]*)\sbitrate=\s*(?<bitrate>\d+(?:\.\d+)?)kbits\/s(?:\sdup=\s*(?<dup>\d+))?(?:\sdrop=\s*(?<drop>\d+))?\sspeed=\s*(?<speed>\d+(?:\.\d+)?)x/;
-                let ffmatch = str.match(ffmpeg_reg);
-                if (ffmatch === null) continue;
-                progress['frame'] = parseInt(ffmatch.groups.frame);
-                progress['fps'] = parseFloat(ffmatch.groups.fps);
-                progress['q'] = parseFloat(ffmatch.groups.q);
-                progress['size'] = parseInt(ffmatch.groups.size);
-                progress['time'] = ffmatch.groups.time;
-                progress['bitrate'] = parseFloat(ffmatch.groups.bitrate);
-                progress['dup'] = ffmatch.groups.dup == null ? 0 : parseInt(ffmatch.groups.dup);
-                progress['drop'] = ffmatch.groups.drop == null ? 0 : parseInt(ffmatch.groups.drop);
-                progress['speed'] = parseFloat(ffmatch.groups.speed);
-
-                let current = 0;
-                const times = progress.time.split(':');
-                for (let i = 0; i < times.length; i++) {
-                    if (i == 0) {
-                        current += parseFloat(times[i]) * 3600;
-                    } else if (i == 1) {
-                        current += parseFloat(times[i]) * 60;
-                    } else if (i == 2) {
-                        current += parseFloat(times[i]);
-                    }
+        const lines = String(data).split('\n');
+        for (let line of lines) {
+            if (line.startsWith('frame')) {
+                const m = line.match(/frame=\s*(\d+).*time=(\d+):(\d+):(\d+\.\d+)/);
+                if (m) {
+                    const time = (+m[1] * 3600) + (+m[2] * 60) + parseFloat(m[3]);
+                    const percent = duration ? time / duration : 0;
+                    console.log(JSON.stringify({ type: 'progress', percent: percent, log: line.trim() }));
                 }
-
-                const percent = current / duration;
-                const log =
-                    'frame= ' +
-                    progress.frame +
-                    ' fps=' +
-                    progress.fps +
-                    ' size=' +
-                    progress.size +
-                    ' time=' +
-                    progress.time +
-                    ' bitrate=' +
-                    progress.bitrate +
-                    ' drop=' +
-                    progress.drop +
-                    ' speed=' +
-                    progress.speed;
-
-                console.log(JSON.stringify({ type: 'progress', percent: percent, log: log }));
             }
         }
     });
 
     child.on('exit', (code, signal) => {
         if (code === 0) {
-            console.log(`?? ffmpeg exited with code: ${code}, signal: ${signal}`);
+            console.log(`[DONE] ffmpeg exited cleanly: ${code}, signal: ${signal}`);
             return;
         }
 
-        console.error(`?? ffmpeg failed with code: ${code}, trying fallback`);
-
-        const fallbackArgs = args.map(arg => {
-            if (arg === '-c:a') return 'aac';
-            if (arg === '-bsf:a') return null;
-            return arg;
-        }).filter(Boolean);
+        console.error(`[WARN] ffmpeg failed (${code}). Trying fallback...`);
+        const fallbackArgs = args.map(arg => arg === '-c:a' ? 'aac' : arg).filter(arg => arg !== '-bsf:a');
 
         const fallback = spawn(ffmpeg, fallbackArgs);
-
-        fallback.stderr.on('data', data => {
-            console.error('[ffmpeg fallback stderr]', data.toString());
-        });
-
-        fallback.on('exit', (code, signal) => {
-            console.log(`?? fallback ffmpeg exited with code: ${code}, signal: ${signal}`);
-        });
+        fallback.stderr.on('data', d => console.error('[ffmpeg fallback stderr]', d.toString()));
+        fallback.on('exit', (c, s) => console.log(`[DONE] fallback ffmpeg exited: ${c}, signal: ${s}`));
     });
 
-    process.on('SIGINT', () => {
-        child.kill('SIGINT');
-    });
+    process.on('SIGINT', () => child.kill('SIGINT'));
 })();

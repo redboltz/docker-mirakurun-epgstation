@@ -1,6 +1,8 @@
 console.log('start');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
+const path = require('path');
+
 const ffmpeg = process.env.FFMPEG;
 const ffprobe = process.env.FFPROBE;
 const input = process.env.INPUT;
@@ -38,9 +40,18 @@ const detect5_1StartTime = async filePath => {
     const tmpDir = 'recorded/tmp_audio_scan';
     fs.mkdirSync(tmpDir, { recursive: true });
     for (let i = 0; i <= 120; i += 2) {
-        const tmpWav = `${tmpDir}/audio_${i}.wav`;
+        const tmpWav = path.join(tmpDir, `audio_${i}.wav`);
         await new Promise(resolve => {
-            const proc = spawn(ffmpeg, ['-v', 'error', '-y', '-ss', `${i}`, '-t', '1', '-i', filePath, '-vn', '-acodec', 'pcm_s16le', '-ac', '6', '-f', 'wav', tmpWav]);
+            const proc = spawn(ffmpeg, [
+                '-v', 'error', '-y',
+                '-i', filePath,        // © æ‚É“ü—Í
+                '-ss', `${i}`, '-t', '1',
+                '-vn', '-acodec', 'pcm_s16le',
+                '-ac', '6', '-f', 'wav',
+                tmpWav
+            ]);
+
+            // const proc = spawn(ffmpeg, ['-v', 'error', '-y', '-ss', `${i}`, '-t', '1', '-i', filePath, '-vn', '-acodec', 'pcm_s16le', '-ac', '6', '-f', 'wav', tmpWav]);
             proc.on('exit', resolve);
         });
         const channels = await new Promise(resolve => {
@@ -60,7 +71,22 @@ const detect5_1StartTime = async filePath => {
 
 (async () => {
     const duration = await getDuration(input);
-    const startTime = await detect5_1StartTime(input);
+    const probedChannels = await new Promise((resolve, reject) => {
+        execFile(ffprobe, ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=channels', '-of', 'json', input], (err, stdout) => {
+            if (err) return resolve(0);
+            try {
+                const result = JSON.parse(stdout);
+                resolve(result.streams[0].channels || 0);
+            } catch (_) {
+                resolve(0);
+            }
+        });
+    });
+
+    let startTime = null;
+    if (!isDualMono && probedChannels >= 6) {
+        startTime = await detect5_1StartTime(input);
+    }
 
     const args = ['-y'];
     if (startTime !== null) {

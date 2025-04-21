@@ -5,8 +5,6 @@ const writeDebug = (msg) => {
 };
 
 writeDebug('start');
-writeDebug('[ENV] process.argv[2] = ' + process.argv[2]);
-writeDebug('[ENV] RECORDED_ID = ' + process.env.RECORDED_ID);
 
 const { spawn, execFile } = require('child_process');
 const path = require('path');
@@ -17,7 +15,6 @@ const ffprobe = process.env.FFPROBE;
 const input = process.env.INPUT;
 const output = process.env.OUTPUT;
 const description = process.env.DESCRIPTION || '';
-const recordedId = process.env.RECORDED_ID;
 const apiHost = process.env.EPGSTATION_API_HOST || 'http://localhost:8888';
 
 const getRecordedInfo = async (id) => {
@@ -28,6 +25,23 @@ const getRecordedInfo = async (id) => {
         writeDebug('[ERROR] Failed to fetch recorded info: ' + err.message);
         return null;
     }
+};
+
+const findRecordedIdByInput = async (inputPath, limit = 20) => {
+    try {
+        const res = await axios.get(`${apiHost}/api/recorded?limit=${limit}&isHalfWidth=true`);
+        const basename = path.basename(inputPath);
+        for (const rec of res.data.result || []) {
+            if (path.basename(rec.videoFiles?.[0]?.filename || '') === basename) {
+                writeDebug(`[INFO] Matched input to recorded.id=${rec.id}`);
+                return rec.id;
+            }
+        }
+        writeDebug('[WARN] No matching recorded.id found for: ' + basename);
+    } catch (err) {
+        writeDebug('[ERROR] Failed to search recorded list: ' + err.message);
+    }
+    return null;
 };
 
 const detectAudioType = (recorded) => {
@@ -103,6 +117,13 @@ const detect5_1StartTime = async filePath => {
 
 (async () => {
     const duration = await getDuration(input);
+
+    let recordedId = process.env.RECORDED_ID;
+    if (!recordedId) {
+        writeDebug('[INFO] RECORDED_ID not set, attempting to find via filename...');
+        recordedId = await findRecordedIdByInput(input);
+    }
+
     const recorded = await getRecordedInfo(recordedId);
     const audioType = detectAudioType(recorded);
 

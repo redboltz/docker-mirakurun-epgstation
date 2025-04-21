@@ -7,6 +7,7 @@ const ffmpeg = process.env.FFMPEG;
 const ffprobe = process.env.FFPROBE;
 const input = process.env.INPUT;
 const output = process.env.OUTPUT;
+const description = process.env.DESCRIPTION || '';
 const isDualMono = parseInt(process.env.AUDIOCOMPONENTTYPE, 10) === 2;
 
 if (!fs.existsSync(input)) {
@@ -15,6 +16,15 @@ if (!fs.existsSync(input)) {
 } else {
     console.log('[INFO] Input file exists:', input);
 }
+
+const is51ByDesc = /3\/2\s*\+\s*LFE.*\(3\/2\.1.*\)/.test(description);
+const isDualMonoByDesc = /1\/0\s*\+\s*1\/0.*\(ƒfƒ…ƒAƒ‹ƒ‚ƒm\)/.test(description);
+const isSingleMonoByDesc = /1\/0.*\(ƒVƒ“ƒOƒ‹ƒ‚ƒm\)/.test(description);
+
+if (is51ByDesc) console.log('[INFO] 5.1ch detected from description. Using AC3.');
+else if (isDualMonoByDesc) console.log('[INFO] Dual Mono detected from description. Using 2-track AAC.');
+else if (isSingleMonoByDesc) console.log('[INFO] Single Mono detected from description. Using AAC mono.');
+else console.log('[INFO] 2ch stereo assumed. Using AAC.');
 
 const VIDEO_ENCODING_PARAMS = {
     rc: 'vbr_hq',
@@ -44,14 +54,10 @@ const detect5_1StartTime = async filePath => {
         await new Promise(resolve => {
             const proc = spawn(ffmpeg, [
                 '-v', 'error', '-y',
-                '-i', filePath,        // © æ‚É“ü—Í
-                '-ss', `${i}`, '-t', '1',
-                '-vn', '-acodec', 'pcm_s16le',
-                '-ac', '6', '-f', 'wav',
+                '-i', filePath, '-ss', `${i}`, '-t', '1',
+                '-vn', '-acodec', 'pcm_s16le', '-ac', '6', '-f', 'wav',
                 tmpWav
             ]);
-
-            // const proc = spawn(ffmpeg, ['-v', 'error', '-y', '-ss', `${i}`, '-t', '1', '-i', filePath, '-vn', '-acodec', 'pcm_s16le', '-ac', '6', '-f', 'wav', tmpWav]);
             proc.on('exit', resolve);
         });
         const channels = await new Promise(resolve => {
@@ -71,20 +77,8 @@ const detect5_1StartTime = async filePath => {
 
 (async () => {
     const duration = await getDuration(input);
-    const probedChannels = await new Promise((resolve, reject) => {
-        execFile(ffprobe, ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=channels', '-of', 'json', input], (err, stdout) => {
-            if (err) return resolve(0);
-            try {
-                const result = JSON.parse(stdout);
-                resolve(result.streams[0].channels || 0);
-            } catch (_) {
-                resolve(0);
-            }
-        });
-    });
-
     let startTime = null;
-    if (!isDualMono && probedChannels >= 6) {
+    if (is51ByDesc) {
         startTime = await detect5_1StartTime(input);
     }
 
@@ -92,34 +86,36 @@ const detect5_1StartTime = async filePath => {
     if (startTime !== null) {
         console.log(`[INFO] 5.1ch detected. Starting at ${startTime} seconds.`);
         args.push('-ss', `${startTime}`);
-    } else {
-        console.log('[INFO] 5.1ch not detected in first 2 minutes. Encoding from beginning.');
     }
 
     args.push('-fix_sub_duration');
     args.push('-i', input);
     args.push('-map', '0:v', '-c:v', 'h264_nvenc', '-vf', 'yadif');
 
-    if (isDualMono) {
-        args.push('-filter_complex', 'channelsplit[FL][FR]',
+    if (isDualMono || isDualMonoByDesc) {
+        args.push(
+            '-filter_complex', 'channelsplit[FL][FR]',
             '-map', '[FL]', '-map', '[FR]',
             '-metadata:s:a:0', 'language=jpn',
             '-metadata:s:a:1', 'language=eng',
-            '-c:a', 'aac', '-b:a', '192k');
-    } else if (startTime !== null) {
+            '-c:a', 'aac', '-b:a', '192k'
+        );
+    } else if (is51ByDesc && startTime !== null) {
         args.push('-map', '0:a:0', '-channel_layout', '5.1', '-c:a', 'ac3', '-b:a', '640k');
     } else {
         args.push('-map', '0:a:0', '-c:a', 'aac', '-b:a', '192k');
     }
 
     args.push('-map', '0:s?', '-c:s', 'mov_text');
-    args.push('-rc:v', VIDEO_ENCODING_PARAMS.rc,
+    args.push(
+        '-rc:v', VIDEO_ENCODING_PARAMS.rc,
         '-cq:v', VIDEO_ENCODING_PARAMS.cq,
         '-b:v', VIDEO_ENCODING_PARAMS.bitrate,
         '-maxrate:v', VIDEO_ENCODING_PARAMS.maxrate,
         '-bufsize:v', VIDEO_ENCODING_PARAMS.bufsize,
         '-preset', VIDEO_ENCODING_PARAMS.preset,
-        '-profile:v', VIDEO_ENCODING_PARAMS.profile);
+        '-profile:v', VIDEO_ENCODING_PARAMS.profile
+    );
     args.push(output);
 
     let child = spawn(ffmpeg, args);
@@ -143,10 +139,8 @@ const detect5_1StartTime = async filePath => {
             console.log(`[DONE] ffmpeg exited cleanly: ${code}, signal: ${signal}`);
             return;
         }
-
         console.error(`[WARN] ffmpeg failed (${code}). Trying fallback...`);
         const fallbackArgs = args.map(arg => arg === '-c:a' ? 'aac' : arg).filter(arg => arg !== '-bsf:a');
-
         const fallback = spawn(ffmpeg, fallbackArgs);
         fallback.stderr.on('data', d => console.error('[ffmpeg fallback stderr]', d.toString()));
         fallback.on('exit', (c, s) => console.log(`[DONE] fallback ffmpeg exited: ${c}, signal: ${s}`));

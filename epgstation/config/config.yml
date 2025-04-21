@@ -38,13 +38,17 @@ encodeProcessNum: 100
 concurrentEncodeNum: 1
 encode:
     - name: H.264
-      cmd: '%NODE% %ROOT%/config/enc.js'
+      cmd: '%NODE% %ROOT%/config/enc.js TESTRECID123'
       suffix: .mp4
       rate: 8.0
     - name: H.264 NVENC
       cmd: '%NODE% %ROOT%/config/enc_nv.js'
       suffix: .mp4
       rate: 8.0
+      env:
+          DUMP_TEST: 'hello_env_test'
+#          RECORDED_ID: '8600'
+#          EPGSTATION_API_HOST: 'http://localhost:8888'
 
 urlscheme:
     m2ts:

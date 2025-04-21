@@ -77,6 +77,16 @@ const detect5_1StartTime = async filePath => {
         startTime = await detect5_1StartTime(input);
     }
 
+    // Save DESCRIPTION to a file
+    if (description) {
+        const descFilePath = path.join(
+            path.dirname(output),
+            path.basename(output, path.extname(output)) + '.desc.txt'
+        );
+        fs.writeFileSync(descFilePath, description, 'utf-8');
+        console.log('[INFO] Description saved to', descFilePath);
+    }
+
     const args = ['-y'];
     if (startTime !== null) {
         console.log(`[INFO] 5.1ch detected. Starting at ${startTime} seconds.`);

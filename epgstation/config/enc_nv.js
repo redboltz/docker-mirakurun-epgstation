@@ -31,8 +31,15 @@ const findRecordedIdByInput = async (inputPath, limit = 20) => {
     try {
         const res = await axios.get(`${apiHost}/api/recorded?limit=${limit}&isHalfWidth=true`);
         const basename = path.basename(inputPath);
-        for (const rec of res.data.result || []) {
-            if (path.basename(rec.videoFiles?.[0]?.filename || '') === basename) {
+        writeDebug(`[DEBUG] comparing input filename: "${basename}"`);
+        if (!Array.isArray(res.data.records)) {
+            writeDebug(`[ERROR] Unexpected API response: res.data.records is not an array: ${JSON.stringify(res.data)}`);
+            return null;
+        }
+        for (const rec of res.data.records) {
+            const recFilename = path.basename(rec.videoFiles?.[0]?.filename || '');
+            writeDebug(`[DEBUG] candidate recorded.filename: "${recFilename}"`);
+            if (recFilename === basename) {
                 writeDebug(`[INFO] Matched input to recorded.id=${rec.id}`);
                 return rec.id;
             }
@@ -45,14 +52,16 @@ const findRecordedIdByInput = async (inputPath, limit = 20) => {
 };
 
 const detectAudioType = (recorded) => {
-    if (!recorded || !recorded.audio) return 'unknown';
-    const types = recorded.audio.map(comp => comp.componentType);
-    writeDebug('[DEBUG] componentTypes: ' + JSON.stringify(types));
-    if (types.some(t => t.includes('3/2') && (t.includes('LFE') || t.includes('3/2.1')))) return '5.1ch';
-    if (types.some(t => t.includes('1/0 + 1/0') || t.includes('ƒfƒ…ƒAƒ‹ƒ‚ƒm'))) return 'dualmono';
-    if (types.some(t => t.includes('1/0'))) return 'mono';
-    if (types.some(t => t.includes('2/0'))) return 'stereo';
-    return 'unknown';
+    const acType = recorded?.audioComponentType;
+    writeDebug('[DEBUG] audioComponentType: ' + acType);
+
+    switch (acType) {
+        case 1: return 'mono';
+        case 2: return 'dualmono';
+        case 3: return 'stereo';
+        case 9: return '5.1ch';
+        default: return 'unknown';
+    }
 };
 
 writeDebug('[DEBUG] description: ' + JSON.stringify(description));

@@ -1,14 +1,18 @@
 const fs = require('fs');
-const debugLogPath = '/app/logs/enc_nv_debug.log';
+const path = require('path');
+const { spawn, execFile } = require('child_process');
+const axios = require('axios');
+
+// ログファイルローリング（タイムスタンプ付き）
+const now = new Date();
+const pad = n => String(n).padStart(2, '0');
+const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+const debugLogPath = `/app/logs/enc_nv_debug_${timestamp}.log`;
 const writeDebug = (msg) => {
     fs.appendFileSync(debugLogPath, `[${new Date().toISOString()}] ${msg}\n`);
 };
 
 writeDebug('start');
-
-const { spawn, execFile } = require('child_process');
-const path = require('path');
-const axios = require('axios');
 
 const ffmpeg = process.env.FFMPEG;
 const ffprobe = process.env.FFPROBE;
@@ -188,20 +192,14 @@ const detect5_1StartTime = async filePath => {
     child.stderr.on('data', data => {
         const lines = String(data).split('\n');
         for (let line of lines) {
-            if (line.startsWith('frame')) {
-                const m = line.match(/frame=\s*(\d+).*time=(\d+):(\d+):(\d+\.\d+)/);
-                if (m) {
-                    const time = (+m[1] * 3600) + (+m[2] * 60) + parseFloat(m[3]);
-                    const percent = duration ? time / duration : 0;
-                    writeDebug(JSON.stringify({ type: 'progress', percent: percent, log: line.trim() }));
-                }
-            }
+            // "progress" ログを出力しないように変更
         }
     });
 
     child.on('exit', (code, signal) => {
         if (code === 0) {
             writeDebug(`[DONE] ffmpeg exited cleanly: ${code}, signal: ${signal}`);
+            writeDebug('finished');
             return;
         }
 
